@@ -96,8 +96,11 @@ class OutputHandler {
     }
   }
 
+  // Calculates the optimal pipe size for outputting |out_bytes|.
   size_t TargetPipeSize(size_t out_bytes) {
-    // Min pipe size on Linux is 4kb.
+    // Pipe sizes must be powers of 2 and >= 4kb on Linux.
+    // We want that the entire output fills up the pipe (but still maximize
+    // the pipe size), so we round |out_bytes| down to the nearest power or two.
     return std::max(4ul * 1024, std::bit_floor(out_bytes));
   }
 
@@ -238,7 +241,7 @@ class Run {
     return RunLines() / LinesInHalfBatch();
   }
 
-  // Fills |out| with the nth half-batch (0-indexed). This is a relatively 
+  // Fills |out| with the nth half-batch (0-indexed). This is a relatively
   // slow operation so we do this only at the beginning of each run.
   static char* InitHalfBatch(char* out, int64_t n) {
     int64_t start = PowTen(DIGITS - 1) + n * LinesInHalfBatch();
@@ -420,7 +423,7 @@ class Run {
     // number of overflows that occur is |overflow_digits|.
     // For maximum performance, |line_start| should be deducible at compile
     // time.
-    __attribute__((always_inline)) // gcc does not inline the function otherwise
+    __attribute__((always_inline))
     static inline void IncrementNumber(char* base,
                                        int64_t line_start,
                                        int overflow_digits) {
@@ -442,6 +445,7 @@ class Run {
     // |base| must by aligned to 8 bytes.
     // For maximum performance, |index| and |by| should be deducible by the
     // compiler to constants.
+    __attribute__((always_inline))
     static inline void IncrementAt(char* base, int64_t index, char by) {
       // The code below only works on little endian systems.
       static_assert(std::endian::native == std::endian::little);

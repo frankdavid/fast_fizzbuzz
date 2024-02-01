@@ -14,6 +14,9 @@ To benchmark (Requires installing `pv`):
 taskset -c 0-2 ./fizzbuzz | taskset -c 3 pv > /dev/null
 ```
 
+You need to update `/proc/sys/fs/pipe-max-size` to be at least `4194304` (4Mb) or alternatively
+you can run the command as root.
+
 Requires Linux 2.6.17 or later.
 
 ---
@@ -160,8 +163,8 @@ On little endian systems (like x86) where the least significant byte is at the l
 
 ```cpp
 base[index \ 8] += 1 << (5 * 8)  |  (1 - 10) << (6 * 8)  |  (6 - 10) << (7 * 8)
-                         ^            ^
-                     index mod 8    increment by
+                         ^             ^
+                  index mod 8 = 5    increment by 1 - 10 (add carry and handle overflow)
 ```
 Each update we want to do to the numbers is OR-d together. What's even better is that even if we write individual instructions, the compiler is smart enough to compile it to a single expression as long as the right handside is a compile-time constant.
 
@@ -185,8 +188,26 @@ Using C++ templates, we generate specialized code for each (run digits, chunk id
 
 * run digits: the number of digits of each number line in this run
 * chunk id: to distinguish the chunk in the half batch, 0, 1 or 2
-* overflows: the number of digits that overflow after incrementing the last digit of the prefix
+* overflow count: the number of digits that overflow after incrementing the last digit of the prefix
 
 In order to support the compiler in generating branchless code, we aggressively unroll loops so conditions and calculations can be done at compile time. The price is a long compile time.
 
-The specialized code only contains add/sub instructions without any branches. Most of the time, we only need 8 add instructions for each fifteener. The 3 chunks can be updated parallelly from 3 threads, e.g. with openmp (hand coding the parallel execution may lead to further performance gains, I haven't tried it).
+If we inspect the generated assembly, we can see that the compiler generates
+specialized code which only contains add/sub instructions without any branches.
+
+```asm
+add	QWORD PTR 8[rax], rdx
+sub	QWORD PTR 40[rax], 1033
+add	QWORD PTR 32[rax], rdx
+add	QWORD PTR 56[rax], r8
+sub	QWORD PTR 88[rax], 4
+add	QWORD PTR 80[rax], rsi
+sub	QWORD PTR 104[rax], 67698432
+sub	QWORD PTR 128[rax], 67698432
+sub	QWORD PTR 160[rax], 4
+[many more add/sub]
+```
+
+Most of the time, we only need 8 instructions for each fifteener.
+
+The 3 chunks can be updated parallelly from 3 threads, e.g. with openmp (hand coding the parallel execution may lead to further performance gains, I haven't tried it).
