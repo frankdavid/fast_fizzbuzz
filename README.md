@@ -14,6 +14,10 @@ To benchmark (Requires installing `pv`):
 taskset -c 0-2 ./fizzbuzz | taskset -c 3 pv > /dev/null
 ```
 
+The program uses 3 threads, so the best is to assign 3 cores. It's worth trying different cpu affinities to see what gives the best performance.
+
+Eg. `taskset -c 0,2,4 ./fizzbuzz | taskset -c 6 pv > /dev/null`
+
 You need to update `/proc/sys/fs/pipe-max-size` to be at least `4194304` (4Mb) or alternatively
 you can run the command as root.
 
