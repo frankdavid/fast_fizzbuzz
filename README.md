@@ -1,29 +1,35 @@
 # The (perhaps) fastest FizzBuzz implementation
 
-**130 GB/s** output on AMD Ryzen 9 7950X.
+**205 GB/s** output on AMD Ryzen 9 7700X.
 
 Motivation: https://codegolf.stackexchange.com/questions/215216/high-throughput-fizz-buzz
 
 To build (tested with GCC 13):
 ```
-g++ fizzbuzz.cc -march=native -o fizzbuzz -O3 -Wall -std=c++20 -fopenmp
+g++ fizzbuzz.cc -march=native -o fizzbuzz -O3 -Wall -std=c++20
 ```
 The build takes 1-2 minutes to complete. Compiling with `-mno-sse`
 may yield better runtime performance depending on the CPU.
 
 To benchmark (Requires installing `pv`):
 ```
-taskset -c 0-2 ./fizzbuzz | taskset -c 3 pv > /dev/null
+taskset -c 0-5 ./fizzbuzz | taskset -c 6 pv -B 4M > /dev/null
 ```
 
-The program uses 3 threads, so the best is to assign 3 cores. It's worth trying different cpu affinities to see what gives the best performance.
+Requires Linux 2.6.17 or later.
 
-Eg. `taskset -c 0,2,4 ./fizzbuzz | taskset -c 6 pv > /dev/null`
+### Performance tuning
+1. The value of the `kCoreMultiplier` constant in `fizzbuzz.cc` should be set to
+`floor(available CPU cores / 3)` or less.
+2. The program uses `kCoreMultiplier * 3` threads. It's worth trying different cpu 
+affinities to see what gives the best performance.
+Eg. `taskset -c 0,2,4,6,8,10 ./fizzbuzz | taskset -c 12 pv -B 4M > /dev/null`
+3. For maximum performance, [turn off mitigations](https://jcvassort.open-web.fr/how-to-disable-cpu-mitigations/#how-to-disable-these-mitigations-to-make-linux-fast-again)
+(it's recommended to reenable mitigations after benchmarking since they protect
+against CPU vulnerabilities).
 
 `/proc/sys/fs/pipe-max-size` must be at least `4194304` (4MB) or alternatively
 the program must be run as root (`sudo ...`)
-
-Requires Linux 2.6.17 or later.
 
 ---
 
@@ -47,7 +53,6 @@ Requires Linux 2.6.17 or later.
 * fizzbuzz function: a function that translates the line number to a fizzbuzz line according to the fizzbuzz logic
 * number line: a line of output which is a number (and not fizz, buzz or fizzbuzz)
 * fifteener: 15 lines of consecutive output
-* chunk: 100,000 lines of consecutive output
 * half-batch: 300,000 lines of consecutive output
 * run: consecutive output where the line numbers have the same number of digits in base 10, eg. run(6) is the output for line numbers: 100000 ... 999999
 
@@ -134,9 +139,9 @@ Furthermore, it can happen that more than even the digit before overflows, e.g. 
 The final result is 20439977.
 
 However, checking in each iteration whether an overflow has occurred is pretty slow.
-This is where chunks are useful. A chunk is 100,000 lines of output,
-eg. from lines 12200000 to 12299999. All numbers in a chunk share a common
-prefix.
+This is where chunks are useful. A chunk is maximum 100,000 lines of output,
+eg. from lines 12200000 to 12299999 or from 12200000 to 12249999. All numbers in
+a chunk share a common prefix.
 
     122|53126
         -----  suffix (last 5 digits)
@@ -225,5 +230,6 @@ sub	QWORD PTR 160[rax], 4
 
 Most of the time, we only need 8 instructions for each fifteener.
 
-The 3 chunks can be updated parallelly from 3 threads, I chose openmp (hand 
-coding the parallel execution may lead to further performance gains, I haven't tested it).
+All the chunks are updated in parallel from different threads. Therefore, for 
+maximum performance the number of chunks per half-batch should be less than or
+equal to the number of available CPU cores. 

@@ -6,7 +6,6 @@
 #include <cstring>
 #include <fcntl.h>
 #include <iostream>
-#include <omp.h>
 #include <optional>
 #include <thread>
 #include <sys/mman.h>
@@ -22,19 +21,58 @@ constexpr int64_t PowTen(int x) {
   return result;
 }
 
+// We process chunks in parallel. When |kCoreMultiplier| is 1, each chunk
+// corresponds one-to-one to sections of the output that share the same prefix.
+// When this number is >1, we split sections with the same prefix further and
+// process them in parallel.
+// The code processes |kChunksInHalfBatch| in parallel, so this number should
+// be set to floor(available CPU cores / 3) or less.
+constexpr int64_t kCoreMultiplier = 2;
 // The last kSuffixDigits digits of each number line are untouched when
 // iterating.
 constexpr int64_t kSuffixDigits = 5;
 // Increment the first right-most touched digit by this much in one step. Must
 // be divisible by 6. The code currently only handles when this is single-digit.
 constexpr int64_t kIncrementBy = 6;
-constexpr int64_t kLinesInChunk = PowTen(kSuffixDigits);
-constexpr int64_t kChunksInHalfBatch = kIncrementBy / 2;
+constexpr int64_t kLinesInChunk = PowTen(kSuffixDigits) / kCoreMultiplier;
+constexpr int64_t kChunksInHalfBatch = kIncrementBy / 2 * kCoreMultiplier;
 constexpr int64_t kMaxLinesInHalfBatch = kLinesInChunk * kChunksInHalfBatch;
+
+static_assert(PowTen(kSuffixDigits) % kCoreMultiplier == 0);
 
 constexpr int kFizzLength = 4;
 constexpr int kBuzzLength = 4;
 constexpr int kNewlineLength = 1;
+
+// A barrier that busy waits until all other threads reach the barrier.
+template <typename Completion>
+class SpinningBarrier {
+    int64_t count_;
+    std::atomic<int64_t> spaces_;
+    std::atomic<int64_t> generation_;
+    Completion completion_cb_;
+
+    public:
+    // Constructs a spinning barrier with |count| participating threads and
+    // completion callback |completion_cb|.
+    // After all threads reach the barrier, the last thread executes the
+    // completion callback. The other threads are blocked until the completion
+    // callback returns.
+    SpinningBarrier(int64_t count, Completion completion_cb) :
+        count_(count), spaces_(count), generation_(0),
+        completion_cb_(completion_cb) {}
+
+    void Wait() {
+        int64_t my_generation = generation_;
+        if (!--spaces_) {
+            spaces_ = count_;
+            completion_cb_();
+            ++generation_;
+        } else {
+            while(generation_ == my_generation);
+        }
+    }
+};
 
 // Implements a double-buffering mechanism for efficient output.
 // We work with two buffers, a output buffer and an update buffer.
@@ -264,40 +302,35 @@ class Run {
       InitHalfBatch(output_handler.GetUpdateBuffer(), 1);
       output_handler.Output(HalfBatchBytes());
 
-      int64_t prefix = PowTen(DIGITS - kSuffixDigits - 1);
-
-      for (int64_t half_batch = 2; half_batch < HalfBatchesInRun();
-           ++half_batch) {
-
-        // This part of the code assumes that kChunksInHalfBatch == 3, if this
-        // changes, this part needs to be rewritten.
-        static_assert(kChunksInHalfBatch == 3);
-
-        // We update the 3 chunks of the half batch in 3 threads. For this to
-        // be efficient, each chunk has to be "big enough", otherwise the
-        // threading overhead outweighs the performance gains we get from
-        // parallelism.
-        #pragma omp parallel num_threads(3)
-        {
-          switch (omp_get_thread_num()) {
-            case 0:
-              Chunk<0>(output_handler.GetUpdateBuffer(), prefix)
-                .IncrementNumbers();
-              break;
-            case 1:
-              Chunk<1>(output_handler.GetUpdateBuffer(), prefix + 1)
-                .IncrementNumbers();
-              break;
-            case 2:
-              Chunk<2>(output_handler.GetUpdateBuffer(), prefix + 2)
-                .IncrementNumbers();
-              break;
-          }
-        }
-
+      // We update the all chunks of the half batch in separate threads.
+      // We use a spinning barrier for synchronizing between the threads.
+      // After all threads reach the barrier, the completion function is
+      // executed and the output is written out. Then the next half batch is
+      // processed.
+      SpinningBarrier barrier(kChunksInHalfBatch, [&] {
         output_handler.Output(HalfBatchBytes());
-        prefix += kChunksInHalfBatch;
-      }
+      });
+
+      [&]<size_t... CHUNK_ID>(std::index_sequence<CHUNK_ID...>) {
+        // Launch a thread for each chunk. We could also use a thread pool,
+        // but one run takes long enough that launching new threads is
+        // negligible.
+        (std::jthread([&] {
+          // The prefix for one chunk is the same. After updating all numbers
+          // in the chunk, we increment the prefix.
+          int64_t prefix = PowTen(DIGITS - kSuffixDigits - 1) +
+             CHUNK_ID / kCoreMultiplier;
+          for (int64_t half_batch = 2; half_batch < HalfBatchesInRun();
+               ++half_batch) {
+            Chunk<CHUNK_ID>(output_handler.GetUpdateBuffer(), prefix)
+              .IncrementNumbers();
+            // For the next half batch, use the prefix incremented by
+            // kIncrementBy / 2. We divide by 2 because of the double-buffering.
+            prefix += kIncrementBy / 2;
+            barrier.Wait();
+          }
+        }) , ...);
+      }(std::make_index_sequence<kChunksInHalfBatch>());
     }
   }
 
@@ -305,8 +338,9 @@ class Run {
   // |CHUNK_ID| ∈ [0, kChunksInHalfBatch)
   // Since numbers in each chunk need to be incremented at different indexes,
   // we specialize this class so the indexes can be precomputed at compile time.
-  // Each chunk represents a section of the output belonging to line numbers
-  // 10^kSuffixDigits
+  // Line numbers in one chunk share the same prefix. However, multiple chunks
+  // may be processing the same prefix. This is controlled by the
+  // |kCoreMultiplier| constant.
   template<int CHUNK_ID>
   class Chunk {
     static_assert(CHUNK_ID < kChunksInHalfBatch);
@@ -314,6 +348,7 @@ class Run {
     public:
     // Initializes a chunk that resides in the half-batch pointed to by
     // and has prefix |prefix|.
+    // |half_batch| must be aligned to 8 bytes.
     Chunk(char* half_batch, int64_t prefix) : half_batch_(half_batch),
                                               prefix_(prefix) {}
 
@@ -343,7 +378,6 @@ class Run {
     }
 
     // Increments all the numbers in the chunk.
-    // |half_batch| must be aligned to 8 bytes.
     // This function wraps IncrementNumbersImpl for efficiently dispatching to
     // specialized versions based on |prefix|.
     void IncrementNumbers() {
