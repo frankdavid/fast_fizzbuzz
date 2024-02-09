@@ -481,9 +481,17 @@ class Run {
     // compiler to constants.
     __attribute__((always_inline))
     static inline void IncrementAt(char* base, int64_t index, char by) {
+      union char_array_int64 {
+        char ch[8];
+        int64_t int64;
+      };
+      auto base_as_union = reinterpret_cast<char_array_int64*>(base);
       // The code below only works on little endian systems.
       static_assert(std::endian::native == std::endian::little);
-      *(((int64_t * )(base)) + (index / 8)) += ((int64_t) by) << ((index % 8) * 8);
+      // Increment the character at index |index| by |by|. This works because
+      // we can guarantee that the byte won't overflow.
+      base_as_union[index / 8].int64 +=
+        static_cast<int64_t>(by) << ((index % 8) * 8);
     }
 
     // Returns the number of digits that will overflow when incrementing
