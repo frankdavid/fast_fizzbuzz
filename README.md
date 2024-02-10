@@ -1,34 +1,34 @@
 # The (perhaps) fastest FizzBuzz implementation
 
-**205 GB/s** output on AMD Ryzen 9 7700X.
+**283 GB/s** output on AMD Ryzen 9 7700X.
 
 Motivation: https://codegolf.stackexchange.com/questions/215216/high-throughput-fizz-buzz
 
 To build (tested with GCC 13):
 ```
-g++ fizzbuzz.cc -march=native -o fizzbuzz -O3 -Wall -std=c++20
+g++ fizzbuzz.cc -march=native -o fizzbuzz -O3 -Wall -std=c++20 -fno-tree-vectorize -fno-exceptions
 ```
-The build takes 1-2 minutes to complete. Compiling with `-mno-sse`
+The build takes a few minutes to complete. Compiling with or without `-fno-tree-vectorize`
 may yield better runtime performance depending on the CPU.
 
 To benchmark (Requires installing `pv`):
 ```
-taskset -c 0-5 ./fizzbuzz | taskset -c 6 pv -B 4M > /dev/null
+taskset -c 0-6 ./fizzbuzz | taskset -c 7 pv -B 2M > /dev/null
 ```
 
 Requires Linux 2.6.17 or later.
 
 ### Performance tuning
-1. The value of the `kCoreMultiplier` constant in `fizzbuzz.cc` should be set to
-`floor(available CPU cores / 3)` or less.
-2. The program uses `kCoreMultiplier * 3` threads. It's worth trying different cpu 
-affinities to see what gives the best performance.
-Eg. `taskset -c 0,2,4,6,8,10 ./fizzbuzz | taskset -c 12 pv -B 4M > /dev/null`
+1. The value of the `kParallelism` constant in `fizzbuzz.cc` should be set to
+available CPU cores or less.
+2. The program uses `kParallelism` threads. It's worth trying different cpu 
+affinities to see what gives the best performance. The number of cores assigned
+by `taskset` should be equal to `kParallelism`
 3. For maximum performance, [turn off mitigations](https://jcvassort.open-web.fr/how-to-disable-cpu-mitigations/#how-to-disable-these-mitigations-to-make-linux-fast-again)
 (it's recommended to reenable mitigations after benchmarking since they protect
 against CPU vulnerabilities).
 
-`/proc/sys/fs/pipe-max-size` must be at least `4194304` (4MB) or alternatively
+`/proc/sys/fs/pipe-max-size` must be at least `14680064` (14MB) or alternatively
 the program must be run as root (`sudo ...`)
 
 ---
@@ -38,7 +38,6 @@ the program must be run as root (`sudo ...`)
 
 > I reuse some of the ideas from [ais523's answer](https://codegolf.stackexchange.com/a/236630/7251), namely:
 > *  using vmsplice for zero-copy output into the pipe
-> * double buffering the output
 > * aligning the output buffers to 2MB and using huge pages to minimize TLB lookups
 > 
 > I also recommend [this great article](https://mazzo.li/posts/fast-pipes.html) about Linux pipes and vmsplice.
@@ -53,7 +52,7 @@ the program must be run as root (`sudo ...`)
 * fizzbuzz function: a function that translates the line number to a fizzbuzz line according to the fizzbuzz logic
 * number line: a line of output which is a number (and not fizz, buzz or fizzbuzz)
 * fifteener: 15 lines of consecutive output
-* half-batch: 300,000 lines of consecutive output
+* batch: 1,000,000 lines of consecutive output
 * run: consecutive output where the line numbers have the same number of digits in base 10, eg. run(6) is the output for line numbers: 100000 ... 999999
 
 ### A few observations
@@ -63,60 +62,90 @@ the program must be run as root (`sudo ...`)
 
 **Observation 3:** each run with 2+ digits starts with mod = 10 because 10^N ≡ 10 (mod 15) for N > 0
 
-**Observation 4:** if we have a half-batch (300,000 lines) of output in a buffer,
-we can get the next half-batch by incrementing the 5th digit (0-indexed) from the
-right of each number line by 3. We can keep other digits untouched. We'll call
-the last 5 digits of the number *suffix digits*, since these will never change in a run.
+**Observation 4:** if we have 3 batches (3,000,000 lines) of output in a buffer,
+we can get the next 3 batches by incrementing the 6th digit (0-indexed) from the
+right of each number line by 3 in each batch. We can keep other digits untouched. We'll call
+the last 6 digits of the number *suffix digits*, since these will never change in a run.
 The fizz/buzz/fizzbuzz lines are also untouched.
 
-For example the first half-batch of run(8) looks like this:
+For example the first batch of run(9) looks like this:
 
 ```
 BUZZ
-10000001
+100000001
 FIZZ
-10000003
-10000004
+100000003
+100000004
 FIZZBUZZ
 ...
 FIZZ
-10299999
+100999999
 ```
-After incrementing the number lines by 300,000:
+
+Second batch of run(9):
+```
+BUZZ
+FIZZ
+101000002
+101000003
+...
+101999998
+101999999
+```
+
+Third batch of run(9):
+```
+FIZZBUZZ
+102000001
+102000002
+FIZZ
+...
+102999998
+FIZZ
+```
+
+We can get the fourth batch by incrementing the first batch by 3,000,000:
 
 ```
 BUZZ
-10300001
+103000001
 FIZZ
-10300003
-10300004
+103000003
+103000004
 FIZZBUZZ
 ...
 FIZZ
-10599999
+105999999
 ```
 
-This is exactly the second half-batch, the perfect continuation of the first half-batch.
 Incrementing single digits is much faster than recomputing the numbers every time.
 
-It's important to note that the number lines in the buffer contain the string representation of the numbers, eg. 10300003 is actually ['1','0','3','0','0','0','0','3'] = [49, 48, 51, 48, 48, 48, 48, 51].
+We only need to maintain three buffers for the three batches and keep incrementing numbers by 3,000,000.
 
-### If this is a half-batch what is a batch?
+It's important to note that the number lines in the buffer contain the string
+representation of the numbers, eg. 103000003 is actually `['1','0','3','0','0','0','0','0','3']` = `[49, 48, 51, 48, 48, 48, 48, 48, 51]`.
+Incrementing by 3,000,000 means incrementing the 6th digit (0-indexed) from the right by 3.
 
-A batch is just two half-batches. In order to maximize performance, we use two buffers. While the downstream process is reading from one buffer (_output_ buffer), we concurrently update the other buffer (_update_ buffer). Because there are two half-batches, each with 300,000 lines, we use increments of 6 (and not 3 like above). When we reach the end of one half-batch, we swap them, output the one that we've just updated and start updating the other one.
+Using three buffers also has an addition benefit: we can put up to two buffers
+into the pipe for the downstream process to read from (see vmsplice and
+[this article](https://mazzo.li/posts/fast-pipes.html)) and update the third buffer in the meantime.
 
 The basic algorithm is as follows:
 
 	for run in 1..19:
-      initialize buffer1 with fizz buzz lines between 10^(run-1) and 10^(run-1) + 299,999
-      output buffer1
-      initialize buffer2 with fizz buzz lines between 10^(run-1) + 300,000 and 10^(run-1) + 599,999
-      output buffer2
-      for half_batch in 2..(number of half-batches in run):
-        increment buffer1
-        output buffer1
-        increment buffer2
-        output buffer2
+      initialize batch0 with fizz buzz lines between 10^(run-1) and 10^(run-1) + 999,999
+      output batch0
+      initialize batch1 with fizz buzz lines between 10^(run-1) + 1,000,000 and 10^(run-1) + 1,999,999
+      output batch1
+      initialize batch2 with fizz buzz lines between 10^(run-1) + 2,000,000 and 10^(run-1) + 2,999,999
+      output batch2
+      for batch in 3..(number of batches in run):
+        increment batch0
+        output batch0
+        increment batch1
+        output batch1
+        increment batch2
+        output batch2
 
 The algorithm is fast because the increment operation (which is where most of
 the time is spent) can be optimized really well.
@@ -124,37 +153,38 @@ the time is spent) can be optimized really well.
 ### Overflows and carry
 
 A major complication in the above algorithm is when a digit overflows.
-For example, if we increment the digit '8' in 10839977 by 6, the result is not a
+For example, if we increment the digit '8' in 108399977 by 3, the result is not a
 digit, so we have to take care of the overflow.
-We do this by first incrementing '8' by 6, then subtracting 10 and adding 1 to
+We do this by first incrementing '8' by 3, then subtracting 10 and adding 1 to
 the '0' before the '8' (which is pretty much the process how we'd do it on paper).
-Furthermore, it can happen that more than even the digit before overflows, e.g. if the number is 19839977. In this case, we:
+Furthermore, it can happen that more than even the digit before overflows, e.g. if the number is 198399977. In this case, we:
 
-* add 6 to '8'
-* subtract 10 from '8' + 6
+* add 3 to '8'
+* subtract 10 from '8' + 3
 * add 1 to '9'
 * subtract 10 from '9' + 1
 * add 1 to '1'
 
-The final result is 20439977.
+The final result is 201399977.
 
 However, checking in each iteration whether an overflow has occurred is pretty slow.
-This is where chunks are useful. A chunk is maximum 100,000 lines of output,
-eg. from lines 12200000 to 12299999 or from 12200000 to 12249999. All numbers in
-a chunk share a common prefix.
+This is where batches are useful once again. Since a batch is 1,000,000 lines of output,
+all numbers in a batch share a common prefix.
 
-    122|53126
-        -----  suffix (last 5 digits)
-    ---        prefix (all previous digits)
+    122|531269
+        ------  suffix (last 6 digits)
+    ---         prefix (all previous digits)
  
 
 As mentioned above, the suffixes are never touched after the initialization.
 We only increment the prefix.
 
-The nice property of a chunk is that all numbers in
-a chunk overflow the same way, therefore we only have to check once per chunk, how many digits
+The nice property of a batch is that all numbers in
+a batch overflow the same way, therefore we only have to check once per chunk, how many digits
 will need to be updated for each number. We call this the overflow count.
 
+We get extra performance gains by incrementing each batch from multiple threads.
+One section of a batch updated by a thread is called a **chunk**.
 
 ## C++ tricks
 
@@ -198,14 +228,14 @@ Doing all these bit manipulations at runtime would be slower than just increment
 
 All the calculation needed for the previous step to work fast is done at compile time. A few more observations:
 
-* A half-batch contains 3 chunks.
-* The first chunk starts with mod 10, the second chunk starts with mod 5, the third chunk starts with mod 0.
-* The first chunk is aligned at 8 bytes. We can calculate the length of each chunk at compile time using the number of digits. Note that since chunks don't contain a whole number of fifteeners, the three chunks will have three different sizes.
+* The first batch starts with mod 10, the second batch starts with mod 5, the batch chunk starts with mod 0.
+* The first batch is aligned at 8 bytes. We can calculate the length of each batch and chunk at compile time.
 
-Using C++ templates, we generate specialized code for each `(run digits, chunk id, overflows)` triplet.
+Using C++ templates, we generate specialized code for each `(run digits, batch id, chunk id, overflows)` tuple.
 
 * run digits: the number of digits of each number line in this run
-* chunk id: to distinguish the chunk in the half-batch, 0, 1 or 2
+* batch id: 0, 1 or 2 (see the Observation 4 above)
+* chunk id: to distinguish the chunk in the batch, [0, kParallelism)
 * overflow count: the number of digits that will overflow after incrementing the last digit of the prefix
 
 In order to support the compiler in generating branchless code, we aggressively 
@@ -229,7 +259,3 @@ sub	QWORD PTR 160[rax], 4
 ```
 
 Most of the time, we only need 8 instructions for each fifteener.
-
-All the chunks are updated in parallel from different threads. Therefore, for 
-maximum performance the number of chunks per half-batch should be less than or
-equal to the number of available CPU cores. 
