@@ -8,6 +8,7 @@
 #include <iostream>
 #include <optional>
 #include <thread>
+#include <unistd.h>
 #include <sys/mman.h>
 
 namespace {
