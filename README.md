@@ -11,7 +11,9 @@ g++ fizzbuzz.cc -march=native -o fizzbuzz -O3 -Wall -std=c++20 -fno-tree-vectori
 The build takes a few minutes to complete. Compiling with or without `-fno-tree-vectorize`
 may yield better runtime performance depending on the CPU.
 
-To benchmark (Requires installing `pv`):
+To benchmark:
+1. Install pv (ensure you have [1.6.6](https://github.com/icetee/pv), later versions have an issue which makes the throughput lower when specifying `-B`)
+2. Run
 ```
 taskset -c 0-6 ./fizzbuzz | taskset -c 7 pv -B 2M > /dev/null
 ```
