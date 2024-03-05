@@ -78,15 +78,9 @@ class OutputHandler {
  public:
   OutputHandler() {
     for (int i = 0; i < 3; ++i) {
-      buffers_[i] =
-        static_cast<char*>(aligned_alloc(2 * 1024 * 1024, kBufferSize));
-      madvise(buffers_[i], kBufferSize, MADV_HUGEPAGE);
-    }
-  }
-
-  ~OutputHandler() {
-    for (int i = 0; i < 3; ++i) {
-      free(buffers_[i]);
+      buffers_[i].reset(static_cast<char*>(
+        std::aligned_alloc(2 * 1024 * 1024, kBufferSize)));
+      madvise(buffers_[i].get(), kBufferSize, MADV_HUGEPAGE);
     }
   }
 
@@ -112,9 +106,9 @@ class OutputHandler {
     // but it'd be better not to depend on this assumption).
     SetPipeSize(TargetPipeSize(bytes));
     if (2 * bytes >= pipe_size_) {
-      OutputWithVmSplice(buffers_[buffer_id], bytes);
+      OutputWithVmSplice(buffers_[buffer_id].get(), bytes);
     } else {
-      if (write(STDOUT_FILENO, buffers_[buffer_id], bytes) < 0) {
+      if (write(STDOUT_FILENO, buffers_[buffer_id].get(), bytes) < 0) {
         std::cerr << "write error: " << errno;
         std::abort();
       }
@@ -122,7 +116,7 @@ class OutputHandler {
   }
 
   char* GetBuffer(int buffer_id) {
-    return buffers_[buffer_id];
+    return buffers_[buffer_id].get();
   }
 
   // Returns the next buffer id that can be filled up and outputted.
@@ -183,7 +177,8 @@ class OutputHandler {
     pipe_size_ = new_pipe_size;
   }
 
-  std::array<char*, 3> buffers_;
+  std::array<std::unique_ptr<char[], decltype([](char* x) {std::free(x);})>, 3>
+    buffers_;
   int buffer_id_ = 0;
   size_t pipe_size_;
 };
